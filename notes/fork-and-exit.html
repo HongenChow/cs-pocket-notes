@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="看懂 fork 的兩條執行路徑，分清 exit 與 _exit，並用 waitpid 取得子行程的結束狀態。">
+  <title>fork 與 exit：行程的建立與結束 — CS Pocket Notes</title>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">跳至主要內容</a>
+  <header class="site-header"><div class="container header-inner">
+    <a class="brand" href="../index.html" aria-label="CS Pocket Notes 首頁"><span class="brand-mark" aria-hidden="true">&lt;/&gt;</span>CS Pocket Notes</a>
+    <nav class="site-nav" aria-label="主要導覽"><a href="../index.html#notes">所有筆記</a><a href="../index.html#about">關於本站</a></nav>
+  </div></header>
+  <main id="main" class="container">
+    <nav class="breadcrumb" aria-label="麵包屑導覽"><a href="../index.html">首頁</a><span aria-hidden="true">/</span><span>fork 與 exit：行程的建立與結束</span></nav>
+    <header class="note-heading"><p class="eyebrow">UNIX / C · 行程控制 / PROCESS</p><h1>fork 與 exit：行程的建立與結束</h1><p class="note-deck">看懂 fork 的兩條執行路徑，分清 exit 與 _exit，並用 waitpid 取得子行程的結束狀態。</p></header>
+    <div class="note-layout">
+      <nav class="toc" aria-label="本篇目錄"><h2>本篇目錄</h2><ol>
+        <li><a href="#quick-summary">01 快速摘要</a></li>
+        <li><a href="#core-concepts">02 核心觀念</a></li>
+        <li><a href="#code-example">03 程式範例</a></li>
+        <li><a href="#common-mistakes">04 常見錯誤</a></li>
+        <li><a href="#key-takeaways">05 重點整理</a></li>
+      </ol></nav>
+      <article class="note-content" aria-label="筆記內容">
+        <section id="quick-summary" class="note-section summary">
+          <h2><span class="section-number">01</span>快速摘要 <span lang="en">Quick Summary</span></h2>
+          <p><code>fork()</code> 成功後，父、子行程都從呼叫之後繼續執行，並用不同回傳值區分角色。<code>exit()</code> 會進行 C 函式庫的結束清理，<code>_exit()</code> 不刷新 stdio 緩衝；父行程通常用 <code>waitpid()</code> 取得子行程狀態並完成回收。</p>
+        </section>
+        <section id="core-concepts" class="note-section">
+          <h2><span class="section-number">02</span>核心觀念 <span lang="en">Core Concepts</span></h2>
+          <h3>01 / 一次 fork，兩條路徑</h3>
+          <div class="table-wrap"><table><caption>fork() 的回傳值與角色</caption><thead><tr><th scope="col">回傳值</th><th scope="col">目前角色</th><th scope="col">如何處理</th></tr></thead><tbody>
+          <tr><th scope="row"><code>-1</code></th><td>建立失敗，只有原行程</td><td>檢查 errno，不會產生子行程</td></tr>
+          <tr><th scope="row"><code>0</code></th><td>子行程</td><td>執行子行程分支</td></tr>
+          <tr><th scope="row">大於 0</th><td>父行程</td><td>回傳值是新子行程的 PID</td></tr>
+          </tbody></table></div>
+          <p>父、子行程有各自的普通變數與位址空間；子行程修改普通變數，不會直接改動父行程那份。繼承的 fd 則指向相同的 open file description，因此可能共享檔案位移。明確建立的共享記憶體是另一種機制。</p>
+          <p>作業系統的排程決定誰先執行，不能假設父行程一定先跑。<code>fork()</code> 建立新行程，<code>exec</code> 家族則用新程式替換目前行程的程式映像；兩者常配合使用。</p>
+          <h3>02 / exit 與 _exit 差在哪裡？</h3>
+          <div class="table-wrap"><table><caption>正常結束與直接結束的比較</caption><thead><tr><th scope="col">方式</th><th scope="col">atexit 處理函式</th><th scope="col">刷新 stdio 緩衝</th></tr></thead><tbody>
+          <tr><th scope="row"><code>exit(status)</code></th><td>會呼叫</td><td>會</td></tr>
+          <tr><th scope="row"><code>return status</code>（從 main）</th><td>等同正常 exit 流程</td><td>會</td></tr>
+          <tr><th scope="row"><code>_exit(status)</code></th><td>不會呼叫</td><td>不會</td></tr>
+          </tbody></table></div>
+          <p><code>_exit()</code> 仍會關閉行程的開啟描述符，不等於「核心完全不清理」。它適合用在 fork 後即將結束的子行程路徑，例如 exec 失敗後，避免重跑父行程的 C 層清理。</p>
+          <div class="callout"><p><strong>為什麼訊息可能印兩次？</strong>fork 會複製尚未送出的使用者空間 stdio 緩衝。若兩邊都呼叫 exit，可能各自刷新同一份內容。單執行緒程式可在 fork 前 <code>fflush()</code>；子行程使用 _exit 時，自己的 printf 緩衝也不會自動送出。</p></div>
+          <h3>03 / 結束不等於已回收</h3>
+          <p>在一般父子行程與預設訊號處理下，子行程結束後，核心仍保留狀態供父行程讀取，這段期間稱為 <strong>zombie（殭屍行程）</strong>。<code>waitpid(pid, &amp;status, 0)</code> 等待指定子行程結束並取回狀態；若已結束，便可立即回收。</p>
+          <p><code>status</code> 是編碼後的資訊，先以 <code>WIFEXITED(status)</code> 判斷正常結束，再用 <code>WEXITSTATUS(status)</code> 取出低 8 位元的結束碼。若被訊號終止，改用 <code>WIFSIGNALED</code> 與 <code>WTERMSIG</code>。</p>
+        </section>
+        <section id="code-example" class="note-section">
+          <h2><span class="section-number">03</span>程式範例 <span lang="en">Code Example</span></h2>
+          <p>以下是<strong>單執行緒 POSIX 程式</strong>。父行程先刷新 stdout，子行程以狀態碼 7 結束，父行程等待並解碼結果。</p><p class="code-label">C / fork-and-exit.c</p><pre><code class="language-c">#define _POSIX_C_SOURCE 200809L
+#include &lt;errno.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;sys/types.h&gt;
+#include &lt;sys/wait.h&gt;
+#include &lt;unistd.h&gt;
+
+int main(void)
+{
+    puts(&quot;before fork&quot;);
+    if (fflush(stdout) == EOF) { perror(&quot;fflush&quot;); return 1; }
+
+    pid_t pid = fork();
+    if (pid == -1) { perror(&quot;fork&quot;); return 1; }
+    if (pid == 0) {
+        /* 子行程：不刷新繼承的 stdio 緩衝。 */
+        _exit(7);
+    }
+
+    int status;
+    pid_t waited;
+    do {
+        waited = waitpid(pid, &amp;status, 0);
+    } while (waited == -1 &amp;&amp; errno == EINTR);
+    if (waited == -1) { perror(&quot;waitpid&quot;); return 1; }
+
+    if (WIFEXITED(status)) {
+        printf(&quot;child exit=%d\n&quot;, WEXITSTATUS(status));
+    } else if (WIFSIGNALED(status)) {
+        printf(&quot;child signal=%d\n&quot;, WTERMSIG(status));
+    }
+    return 0;
+}</code></pre>
+          <p class="code-label">SHELL / 編譯與執行</p><pre><code>cc -std=c11 -Wall -Wextra -Wpedantic fork-and-exit.c -o fork-and-exit
+./fork-and-exit</code></pre>
+          <p>預期輸出：</p><pre><code>before fork
+child exit=7</code></pre>
+          <p>7 是<strong>子行程</strong>的結束碼；父行程最後 <code>return 0</code>，所以 shell 觀察到整個範例的結束碼仍是 0。waitpid 被訊號中斷而回傳 <code>EINTR</code> 時，範例會重試。</p>
+          <div class="callout"><p><strong>多執行緒的額外限制：</strong>多執行緒行程 fork 後，子行程在 exec 前只能呼叫 async-signal-safe 函式。不要把 printf、exit 或一般函式庫清理直接搬進這段路徑；本範例的子行程只呼叫 _exit。</p></div>
+        </section>
+        <section id="common-mistakes" class="note-section">
+          <h2><span class="section-number">04</span>常見錯誤 <span lang="en">Common Mistakes</span></h2>
+          <ul><li><strong>「fork 回傳 0 代表失敗」：</strong>0 代表自己是子行程，-1 才是失敗。</li><li><strong>「子行程從 main 重新執行」：</strong>它從 fork 呼叫之後繼續。</li><li><strong>「exit 只關閉行程，不會處理緩衝」：</strong>它會執行 atexit 處理函式並刷新 stdio，可能造成重複輸出。</li><li><strong>「waitpid 回傳值就是結束碼」：</strong>成功時回傳子行程 PID，結束資訊寫入 status，須以巨集解碼。</li><li><strong>「sleep 一下就等於同步」：</strong>sleep 不保證子行程已完成；要用 waitpid 或合適的同步機制。</li></ul>
+        </section>
+        <section id="key-takeaways" class="note-section takeaways">
+          <h2><span class="section-number">05</span>重點整理 <span lang="en">Key Takeaways</span></h2>
+          <ol><li>fork 的 -1、0、正數分別對應失敗、子行程、父行程。</li><li>普通記憶體各自獨立，繼承的 fd 卻可能共享開啟狀態。</li><li>exit 會做 C 層清理；_exit 不刷新 stdio 緩衝。</li><li>父行程使用 waitpid 回收子行程，不能靠排程順序猜測完成時間。</li><li>先判斷 WIFEXITED，再讀取 WEXITSTATUS。</li></ol>
+        </section>
+        <details class="references"><summary>參考文件與延伸閱讀</summary><p>以下為 Linux man-pages 專案文件；本文以 POSIX 共通觀念為主，平台差異另行註明。</p><ul><li><a href="https://man7.org/linux/man-pages/man2/fork.2.html">fork(2)：記憶體、繼承與多執行緒限制</a></li><li><a href="https://man7.org/linux/man-pages/man3/exit.3.html">exit(3)：正常結束清理</a></li><li><a href="https://man7.org/linux/man-pages/man2/_exit.2.html">_exit(2)：直接結束與 stdio</a></li><li><a href="https://man7.org/linux/man-pages/man2/wait.2.html">wait(2)：waitpid 與狀態巨集</a></li><li><a href="file-offset.html">相關筆記：檔案位移與共享狀態</a></li></ul></details>
+        <div class="note-bottom"><a href="../index.html">← 返回首頁</a><a href="#main">回到頂端 ↑</a></div>
+      </article>
+    </div>
+  </main>
+  <footer class="site-footer"><div class="container footer-inner"><p><strong>CS Pocket Notes</strong> · 電腦科學口袋筆記</p><p>用小篇幅，累積扎實的理解。</p></div></footer>
+</body>
+</html>

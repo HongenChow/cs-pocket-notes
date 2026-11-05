@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="用 fcntl 與 struct flock 理解 POSIX record locking：讀寫鎖、位元組範圍、阻塞等待，以及 fork 和 close 的常見陷阱。">
+  <title>fcntl() Record Locking — CS Pocket Notes</title>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">跳至主要內容</a>
+  <header class="site-header"><div class="container header-inner">
+    <a class="brand" href="../index.html" aria-label="CS Pocket Notes 首頁"><span class="brand-mark" aria-hidden="true">&lt;/&gt;</span>CS Pocket Notes</a>
+    <nav class="site-nav" aria-label="主要導覽"><a href="../index.html#notes">所有筆記</a><a href="../index.html#about">關於本站</a></nav>
+  </div></header>
+  <main id="main" class="container">
+    <nav class="breadcrumb" aria-label="麵包屑導覽"><a href="../index.html">首頁</a><span aria-hidden="true">/</span><span>fcntl() Record Locking</span></nav>
+    <header class="note-heading"><p class="eyebrow">UNIX / C · 檔案鎖定 / FILE LOCKING</p><h1>fcntl() Record Locking</h1><p class="note-deck">鎖住一段位元組，讓多個行程協調讀寫；從鎖的範圍到生命週期，一次理清。</p></header>
+    <div class="note-layout">
+      <nav class="toc" aria-label="本篇目錄"><h2>本篇目錄</h2><ol>
+        <li><a href="#quick-summary">01 快速摘要</a></li>
+        <li><a href="#core-concepts">02 核心觀念</a></li>
+        <li><a href="#code-example">03 程式範例</a></li>
+        <li><a href="#common-mistakes">04 常見錯誤</a></li>
+        <li><a href="#key-takeaways">05 重點整理</a></li>
+      </ol></nav>
+      <article class="note-content" aria-label="筆記內容">
+        <section id="quick-summary" class="note-section summary">
+          <h2><span class="section-number">01</span>快速摘要 <span lang="en">Quick Summary</span></h2>
+          <p><strong>Record locking（記錄鎖定）</strong>讓行程透過 <code>fcntl()</code> 對檔案的某段位元組設定讀鎖或寫鎖，不必鎖住整份檔案。本文介紹傳統 POSIX、與行程關聯的 <strong>advisory lock（建議式鎖）</strong>：參與者必須遵守相同的鎖定協定，才能協調存取。</p>
+        </section>
+        <section id="core-concepts" class="note-section">
+          <h2><span class="section-number">02</span>核心觀念 <span lang="en">Core Concepts</span></h2>
+          <h3>01 / Record 是應用程式定義的資料範圍</h3>
+          <p>核心只認得 <strong>byte range（位元組範圍）</strong>，不會自動辨識文字行或 C 的結構。例如每筆資料佔 100 bytes，從 0 編號的第 2 筆資料就位於 bytes 200～299；行程可只鎖這一段，其他不重疊的範圍仍可獨立鎖定。</p>
+          <div class="callout"><p>Advisory lock 不會強迫未配合的行程停止 <code>read()</code> 或 <code>write()</code>。所有參與者都應先取得適當的鎖，再存取資料，完成後才解鎖。</p></div>
+          <h3>02 / 讀鎖共享，寫鎖互斥</h3>
+          <div class="table-wrap"><table><caption>不同的行程對同一檔案之重疊範圍提出鎖定要求</caption><thead><tr><th scope="col">已持有的鎖</th><th scope="col">要求讀鎖 F_RDLCK</th><th scope="col">要求寫鎖 F_WRLCK</th></tr></thead><tbody>
+          <tr><th scope="row">讀鎖 F_RDLCK</th><td>相容，可同時持有</td><td>衝突</td></tr>
+          <tr><th scope="row">寫鎖 F_WRLCK</th><td>衝突</td><td>衝突</td></tr>
+          </tbody></table></div>
+          <p><code>F_RDLCK</code> 是 shared lock，fd 必須允許讀取；<code>F_WRLCK</code> 是 exclusive lock，fd 必須允許寫入。使用 <code>O_RDWR</code> 開啟檔案可申請兩種鎖；<code>F_UNLCK</code> 則用來解除指定範圍的鎖。</p>
+          <h3>03 / 用 struct flock 描述範圍</h3>
+          <ul>
+            <li><code>l_type</code>：指定 <code>F_RDLCK</code>、<code>F_WRLCK</code> 或 <code>F_UNLCK</code>。</li>
+            <li><code>l_whence</code>：<code>l_start</code> 的基準；<code>SEEK_SET</code> 為檔案開頭，<code>SEEK_CUR</code> 為目前 file offset，<code>SEEK_END</code> 為目前檔案結尾。</li>
+            <li><code>l_start</code>：相對於基準的起點位移，以 byte 為單位。</li>
+            <li><code>l_len</code>：正值表示鎖定的位元組數；例如基準為開頭、起點 200、長度 100，範圍是 200～299。<strong>0 表示從起點延伸至檔案結尾，包含之後增長的部分</strong>，不是不鎖任何資料。</li>
+            <li><code>l_pid</code>：使用 <code>F_GETLK</code> 查到衝突的傳統鎖時，用來回報持鎖行程的 PID；不是設定鎖擁有者的輸入欄位。</li>
+          </ul>
+          <p>建議先以 <code>struct flock lock = {0};</code> 初始化，再逐一設定欄位。使用 <code>SEEK_SET</code> 可讓範圍不受目前 file offset 影響；鎖定本身不會移動 file offset，也不會自動讀寫資料。</p>
+          <h3>04 / 設定、等待與查詢</h3>
+          <div class="table-wrap"><table><caption>fcntl(fd, cmd, &amp;lock) 的三種常用命令</caption><thead><tr><th scope="col">cmd</th><th scope="col">用途與衝突時的行為</th></tr></thead><tbody>
+          <tr><th scope="row"><code>F_SETLK</code></th><td>設定鎖或解鎖；遇到衝突不等待鎖釋放，回傳 -1，errno 為 EACCES 或 EAGAIN，應同時檢查兩者。</td></tr>
+          <tr><th scope="row"><code>F_SETLKW</code></th><td>設定鎖或解鎖；申請鎖遇到衝突時等待，直到可取得鎖。等待可能被訊號中斷而回報 EINTR，也可能因偵測到死結而回報 EDEADLK。</td></tr>
+          <tr><th scope="row"><code>F_GETLK</code></th><td>查詢假設的鎖定要求是否衝突；不會取得鎖。無衝突時將 l_type 設成 F_UNLCK；有衝突則回填其中一把衝突鎖的資訊。</td></tr>
+          </tbody></table></div>
+          <p>以上命令成功時回傳 <code>0</code>，失敗回傳 <code>-1</code> 並設定 <code>errno</code>。<code>F_GETLK</code> 的結果只是當下資訊，查詢後仍可能被別的行程搶先取得鎖；真正的互斥必須靠成功的鎖定操作。</p>
+          <h3>05 / 鎖屬於行程，close 的影響比想像中大</h3>
+          <p>傳統 record lock 屬於<strong>行程與檔案的關係</strong>。同一行程對已鎖定範圍重新設鎖，可能轉換、分割或合併既有鎖；不會像兩個獨立行程一樣互相阻擋，因此也不能拿它當同一行程內的 thread mutex。</p>
+          <ul>
+            <li><code>fork()</code> 會繼承 fd，但子行程<strong>不會繼承父行程的傳統 record lock</strong>；子行程若要存取受保護範圍，應自行申請鎖。</li>
+            <li>行程只要 <code>close()</code> 任一個指向該檔案的 fd，該行程在此檔案上的<strong>所有傳統 record locks 都會釋放</strong>，即使關掉的不是最初設鎖的 fd。這也適用於 dup 得到的 fd 或另外 open 同一檔案的 fd。</li>
+            <li>行程結束也會釋放鎖；正常路徑仍應明確使用 <code>F_UNLCK</code>，讓臨界區的界線清楚。</li>
+          </ul>
+          <p>本文不涵蓋 <code>F_OFD_*</code> 的 open file description locks；其擁有者與生命週期不同，不能直接套用上述規則。<code>struct flock</code> 是此處的資料結構，也不要與另一個系統呼叫 <code>flock()</code> 混為一談。</p>
+        </section>
+        <section id="code-example" class="note-section">
+          <h2><span class="section-number">03</span>程式範例 <span lang="en">Code Example</span></h2>
+          <p>在 Linux、macOS 或 WSL 的 POSIX 環境，將下列程式存為 <code>fcntl-record-locking.c</code>。它以寫鎖保護 bytes 0～99，等待使用者按 Enter 後解鎖；只示範臨界區的取得與釋放，不修改檔案內容。</p>
+          <p class="code-label">C / fcntl-record-locking.c</p>
+          <pre><code class="language-c">#define _POSIX_C_SOURCE 200809L
+#include &lt;errno.h&gt;
+#include &lt;fcntl.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;unistd.h&gt;
+
+int main(int argc, char **argv)
+{
+    if (argc != 2) {
+        fprintf(stderr, "usage: %s FILE\n", argv[0]);
+        return 1;
+    }
+    int fd = open(argv[1], O_RDWR | O_CREAT, 0600);
+    if (fd == -1) { perror("open"); return 1; }
+
+    struct flock lock = {0};
+    lock.l_type = F_WRLCK;
+    lock.l_whence = SEEK_SET;
+    lock.l_start = 0;
+    lock.l_len = 100;
+
+    int result = 1;
+    puts("waiting for write lock on bytes 0-99...");
+    fflush(stdout);
+    while (fcntl(fd, F_SETLKW, &amp;lock) == -1) {
+        if (errno == EINTR) continue;
+        perror("fcntl lock");
+        goto done;
+    }
+
+    puts("locked; press Enter to unlock");
+    fflush(stdout);
+    /* Protected file I/O would go here, before unlocking. */
+    int ch;
+    do {
+        ch = getchar();
+    } while (ch != '\n' &amp;&amp; ch != EOF);
+    if (ferror(stdin)) {
+        perror("getchar");
+        goto done;
+    }
+
+    lock.l_type = F_UNLCK;
+    if (fcntl(fd, F_SETLK, &amp;lock) == -1) {
+        perror("fcntl unlock");
+        goto done;
+    }
+    puts("unlocked");
+    result = 0;
+
+done:
+    if (close(fd) == -1) { perror("close"); result = 1; }
+    return result;
+}</code></pre>
+          <p class="code-label">SHELL / 編譯與執行</p>
+          <pre><code>cc -std=c11 -Wall -Wextra -Wpedantic fcntl-record-locking.c -o fcntl-record-locking
+./fcntl-record-locking lock-demo.dat</code></pre>
+          <ol>
+            <li>在終端機 A 執行程式，會印出等待訊息，接著印出 <code>locked; press Enter to unlock</code>，此時先不要按 Enter。</li>
+            <li>在終端機 B 切到<strong>同一個目錄</strong>，執行同一個命令並指定同一檔案。B 只印出等待訊息，阻塞在 <code>F_SETLKW</code>。</li>
+            <li>在 A 按 Enter，A 解鎖並印出 <code>unlocked</code>；B 才能取得鎖並印出 locked 訊息。再於 B 按 Enter 結束。</li>
+          </ol>
+          <p><code>O_CREAT</code> 會在檔案不存在時建立它，沒有 <code>O_TRUNC</code> 因此不清空既有內容。即使檔案是空的，也可以鎖定 bytes 0～99；鎖定不會使檔案增長。stdin 若已到 EOF，程式會直接進入解鎖步驟，因此互動測試時請保留終端機輸入。</p>
+          <div class="callout"><p>可將取得鎖的命令改成 <code>F_SETLK</code>，比較 B 遇到衝突時立即失敗的行為。實際程式應分辨 <code>EACCES</code>／<code>EAGAIN</code> 與其他錯誤；本範例以 <code>perror()</code> 顯示失敗原因並結束。</p></div>
+          <p>實際更新資料時，應將完整的「讀取 → 計算 → 寫回」放在持有寫鎖的區間，並處理短讀、短寫與錯誤。若使用會緩衝的 stdio 寫入，必須在解鎖前成功 <code>fflush()</code>；鎖本身不等於資料已同步到磁碟。</p>
+        </section>
+        <section id="common-mistakes" class="note-section">
+          <h2><span class="section-number">04</span>常見錯誤 <span lang="en">Common Mistakes</span></h2>
+          <ul>
+            <li><strong>「鎖住後，任何行程都不能寫」：</strong>advisory lock 只協調有配合鎖定協定的參與者，無法阻止刻意繞過鎖的 I/O。</li>
+            <li><strong>「l_len = 0 代表零長度」：</strong>它表示鎖到結尾並涵蓋之後的增長；若只保護一筆資料，應明確填入範圍。</li>
+            <li><strong>「F_GETLK 顯示可用，就能直接寫」：</strong>查詢不會保留鎖，仍有 race condition；應先成功取得鎖。</li>
+            <li><strong>「fork 或 dup 後，每個 fd 都有獨立的鎖」：</strong>傳統鎖與行程關聯；fork 的子行程不繼承鎖，而同一行程 close 任一指向該檔案的 fd 都會釋放該檔案上的所有傳統鎖。</li>
+            <li><strong>「只鎖最後的 write 就夠」：</strong>若先讀後改，讀取到寫回之間都應受保護，否則可能發生 lost update。</li>
+            <li><strong>「F_SETLKW 一定會成功」：</strong>等待仍可能失敗；檢查 EINTR、EDEADLK 等錯誤，多範圍鎖定時讓所有行程遵守一致的取得順序以降低死結風險。</li>
+          </ul>
+        </section>
+        <section id="key-takeaways" class="note-section takeaways">
+          <h2><span class="section-number">05</span>重點整理 <span lang="en">Key Takeaways</span></h2>
+          <ol>
+            <li>Record locking 針對 byte range；advisory lock 需要所有參與者配合。</li>
+            <li>重疊範圍內，讀鎖可共享，寫鎖與其他行程的讀寫鎖互斥。</li>
+            <li>用 struct flock 指定類型與範圍；l_len 為 0 會鎖到結尾並涵蓋後續增長。</li>
+            <li>F_SETLK 不等待衝突鎖釋放，F_SETLKW 會等待；F_GETLK 只查詢，不取得鎖。</li>
+            <li>傳統鎖屬於行程，不由 fork 繼承；close 任一指向該檔案的 fd 或結束行程，都會釋放該行程在此檔案上的傳統鎖。</li>
+          </ol>
+        </section>
+        <details class="references"><summary>參考文件與延伸閱讀</summary><p>本文以傳統 POSIX、與行程關聯的 record locks 為範圍；其他鎖介面的規則需分別查閱。</p><ul>
+          <li><a href="https://man7.org/linux/man-pages/man3/fcntl.3p.html">POSIX Programmer's Manual（2017 版）：fcntl() 標準介面</a></li>
+          <li><a href="https://man7.org/linux/man-pages/man2/fcntl_locking.2.html">Linux man-pages：record locks、命令與生命週期</a></li>
+          <li><a href="https://man.openbsd.org/fcntl.2">OpenBSD fcntl(2)：鎖定範圍與衝突規則</a></li>
+          <li><a href="https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/fcntl.2.html">Apple 文件封存：fcntl(2) 與 advisory locks</a></li>
+          <li><a href="file-offset.html">相關筆記：檔案位移與 dup</a></li>
+          <li><a href="fork-and-exit.html">相關筆記：fork 與行程結束</a></li>
+        </ul></details>
+        <div class="note-bottom"><a href="../index.html">← 返回首頁</a><a href="#main">回到頂端 ↑</a></div>
+      </article>
+    </div>
+  </main>
+  <footer class="site-footer"><div class="container footer-inner"><p><strong>CS Pocket Notes</strong> · 電腦科學口袋筆記</p><p>用小篇幅，累積扎實的理解。</p></div></footer>
+</body>
+</html>

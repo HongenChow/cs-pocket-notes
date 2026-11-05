@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="從 read、lseek 到 dup，理解 file offset 儲存在哪裡，以及為什麼不同 fd 會互相影響。">
+  <title>檔案位移：下一次從哪裡讀？ — CS Pocket Notes</title>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">跳至主要內容</a>
+  <header class="site-header"><div class="container header-inner">
+    <a class="brand" href="../index.html" aria-label="CS Pocket Notes 首頁"><span class="brand-mark" aria-hidden="true">&lt;/&gt;</span>CS Pocket Notes</a>
+    <nav class="site-nav" aria-label="主要導覽"><a href="../index.html#notes">所有筆記</a><a href="../index.html#about">關於本站</a></nav>
+  </div></header>
+  <main id="main" class="container">
+    <nav class="breadcrumb" aria-label="麵包屑導覽"><a href="../index.html">首頁</a><span aria-hidden="true">/</span><span>檔案位移：下一次從哪裡讀？</span></nav>
+    <header class="note-heading"><p class="eyebrow">UNIX / C · 檔案操作 / FILE I/O</p><h1>檔案位移：下一次從哪裡讀？</h1><p class="note-deck">從 read、lseek 到 dup，理解 file offset 儲存在哪裡，以及為什麼不同 fd 會互相影響。</p></header>
+    <div class="note-layout">
+      <nav class="toc" aria-label="本篇目錄"><h2>本篇目錄</h2><ol>
+        <li><a href="#quick-summary">01 快速摘要</a></li>
+        <li><a href="#core-concepts">02 核心觀念</a></li>
+        <li><a href="#code-example">03 程式範例</a></li>
+        <li><a href="#common-mistakes">04 常見錯誤</a></li>
+        <li><a href="#key-takeaways">05 重點整理</a></li>
+      </ol></nav>
+      <article class="note-content" aria-label="筆記內容">
+        <section id="quick-summary" class="note-section summary">
+          <h2><span class="section-number">01</span>快速摘要 <span lang="en">Quick Summary</span></h2>
+          <p><strong>File offset（檔案位移）</strong>是可定位檔案下一次讀寫的位元組位置，從 0 開始計算。它屬於核心中的 <strong>open file description</strong>；透過 <code>dup()</code> 或 <code>fork()</code> 取得的相關描述符會共享它。</p>
+        </section>
+        <section id="core-concepts" class="note-section">
+          <h2><span class="section-number">02</span>核心觀念 <span lang="en">Core Concepts</span></h2>
+          <h3>01 / 分清三個層次</h3>
+          <ul><li><strong>File descriptor（fd）：</strong>行程持有的非負整數，例如 <code>3</code>，用來引用已開啟的檔案。</li>
+          <li><strong>Open file description：</strong>核心維護的一次開啟狀態，包含 file offset 與檔案狀態旗標。</li>
+          <li><strong>檔案本身：</strong>實際儲存的資料。同一個檔案可有多個獨立的開啟狀態。</li></ul>
+          <div class="callout"><p><code>fd ─┐</code><br><code>copy ─┴→ 同一個 open file description → 檔案資料</code><br>這是 <code>dup(fd)</code> 的情況：兩個引用，共享一個 offset。</p></div>
+          <h3>02 / read 與 lseek 如何移動位置？</h3>
+          <p>對一般檔案，成功的 <code>read(fd, buf, n)</code> 會從目前 offset 開始，並依<strong>實際讀到</strong>的位元組數前進；回傳值不一定等於 n。要求讀取的長度大於 0 時，回傳 <code>0</code> 表示 EOF，<code>-1</code> 表示錯誤。</p>
+          <div class="table-wrap"><table><caption>lseek(fd, offset, whence) 的三種定位基準</caption><thead><tr><th scope="col">whence</th><th scope="col">新的位置</th><th scope="col">例子</th></tr></thead><tbody>
+          <tr><th scope="row"><code>SEEK_SET</code></th><td>檔案開頭 + offset</td><td><code>lseek(fd, 0, SEEK_SET)</code> 回到開頭</td></tr>
+          <tr><th scope="row"><code>SEEK_CUR</code></th><td>目前位置 + offset</td><td><code>lseek(fd, 2, SEEK_CUR)</code> 向前跳 2 bytes</td></tr>
+          <tr><th scope="row"><code>SEEK_END</code></th><td>檔案大小 + offset</td><td><code>lseek(fd, 0, SEEK_END)</code> 移到結尾</td></tr>
+          </tbody></table></div>
+          <p><code>lseek()</code> 成功時回傳新的 <code>off_t</code> 位移，失敗回傳 <code>(off_t)-1</code>。單純定位不會讀寫資料，也不會改變檔案大小；pipe、FIFO、socket 通常不能用它定位。</p>
+          <h3>03 / 什麼情況共享 offset？</h3>
+          <p><code>dup(fd)</code> 與 <code>fork()</code> 後繼承的 fd 會指向同一個 open file description。相反地，對同一路徑<strong>各自呼叫兩次 <code>open()</code></strong>，會有兩個獨立的 offset；共享檔案資料，不代表共享讀寫位置。</p>
+        </section>
+        <section id="code-example" class="note-section">
+          <h2><span class="section-number">03</span>程式範例 <span lang="en">Code Example</span></h2>
+          <p>範例先讀出 A，再從複製的 fd 讀出 B；接著透過原 fd 將位置設為 3，從複製的 fd 讀到 D。請在 Linux、macOS 或 WSL 的 POSIX 環境執行。</p>
+          <p class="code-label">C / file-offset.c</p><pre><code class="language-c">#define _POSIX_C_SOURCE 200809L
+#include &lt;errno.h&gt;
+#include &lt;fcntl.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;unistd.h&gt;
+
+static int read_one(int fd, char *ch)
+{
+    ssize_t n;
+    do {
+        n = read(fd, ch, 1);
+    } while (n == -1 &amp;&amp; errno == EINTR);
+    if (n == -1) { perror(&quot;read&quot;); return -1; }
+    if (n == 0) { fputs(&quot;file too short\n&quot;, stderr); return -1; }
+    return 0;
+}
+
+int main(int argc, char **argv)
+{
+    if (argc != 2) {
+        fprintf(stderr, &quot;usage: %s FILE\n&quot;, argv[0]);
+        return 1;
+    }
+    int fd = open(argv[1], O_RDONLY);
+    if (fd == -1) { perror(&quot;open&quot;); return 1; }
+    int copy = dup(fd);
+    if (copy == -1) { perror(&quot;dup&quot;); close(fd); return 1; }
+
+    int result = 1;
+    char a, b, d;
+    if (read_one(fd, &amp;a) == -1) goto done;
+    if (read_one(copy, &amp;b) == -1) goto done;
+    if (lseek(fd, 3, SEEK_SET) == (off_t)-1) {
+        perror(&quot;lseek&quot;);
+        goto done;
+    }
+    if (read_one(copy, &amp;d) == -1) goto done;
+    printf(&quot;first=%c second=%c after_seek=%c\n&quot;, a, b, d);
+    result = 0;
+done:
+    if (close(copy) == -1) { perror(&quot;close copy&quot;); result = 1; }
+    if (close(fd) == -1) { perror(&quot;close fd&quot;); result = 1; }
+    return result;
+}</code></pre>
+          <p class="code-label">SHELL / 建立測試資料、編譯與執行</p>
+          <pre><code>printf 'ABCDE' &gt; sample.txt
+cc -std=c11 -Wall -Wextra -Wpedantic file-offset.c -o file-offset
+./file-offset sample.txt</code></pre>
+          <p>預期輸出：<code>first=A second=B after_seek=D</code>。請在測試用目錄操作；第一行會建立或覆寫 <code>sample.txt</code>。</p>
+          <ol><li>初始 offset 是 0，第一個 read 讀到 A，位置變成 1。</li><li>copy 共用位置，所以讀到 B，位置變成 2。</li><li>lseek 將共享位置改成 3，下一次讀到 D，最後位置為 4。</li></ol>
+          <p>範例只讀一個 byte，並處理 <code>EINTR</code>。正式的多位元組讀寫程式還要處理短讀、短寫；不要假設一次呼叫會完成全部資料。</p>
+        </section>
+        <section id="common-mistakes" class="note-section">
+          <h2><span class="section-number">04</span>常見錯誤 <span lang="en">Common Mistakes</span></h2>
+          <ul><li><strong>「offset 存在 fd 整數裡」：</strong>fd 只是引用，位置保存在 open file description。</li><li><strong>「同一個檔案就一定共享位置」：</strong>兩次 open 各自建立狀態，dup 才是共享既有狀態。</li><li><strong>「read 要求多少，就前進多少」：</strong>應依回傳的實際位元組數判斷。</li><li><strong>「每個 fd 都能 lseek」：</strong>pipe 等串流沒有可任意定位的檔案位置，要檢查錯誤。</li><li><strong>「offset 就是第幾個中文字」：</strong>offset 以 byte 計算；UTF-8 字元可能佔多個 bytes。</li></ul>
+        </section>
+        <section id="key-takeaways" class="note-section takeaways">
+          <h2><span class="section-number">05</span>重點整理 <span lang="en">Key Takeaways</span></h2>
+          <ol><li>File offset 是下一次讀寫的位置，以 byte 為單位。</li><li>位置屬於 open file description，dup 與 fork 可以共享它。</li><li>分別 open 同一個檔案，offset 仍然獨立。</li><li>read 依實際讀取量前進；lseek 只調整位置。</li><li>先確認檔案可定位，並檢查每次系統呼叫的回傳值。</li></ol>
+        </section>
+        <details class="references"><summary>參考文件與延伸閱讀</summary><p>以下為 Linux man-pages 專案文件；本文以 POSIX 共通觀念為主，平台差異另行註明。</p><ul><li><a href="https://man7.org/linux/man-pages/man2/open.2.html">open(2)：fd 與 open file description</a></li><li><a href="https://man7.org/linux/man-pages/man2/dup.2.html">dup(2)：共享 offset</a></li><li><a href="https://man7.org/linux/man-pages/man2/read.2.html">read(2)：實際讀取量與 EOF</a></li><li><a href="https://man7.org/linux/man-pages/man2/lseek.2.html">lseek(2)：定位與限制</a></li><li><a href="fork-and-exit.html">相關筆記：fork 與行程結束</a></li></ul></details>
+        <div class="note-bottom"><a href="../index.html">← 返回首頁</a><a href="#main">回到頂端 ↑</a></div>
+      </article>
+    </div>
+  </main>
+  <footer class="site-footer"><div class="container footer-inner"><p><strong>CS Pocket Notes</strong> · 電腦科學口袋筆記</p><p>用小篇幅，累積扎實的理解。</p></div></footer>
+</body>
+</html>

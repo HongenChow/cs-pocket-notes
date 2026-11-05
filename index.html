@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="繁體中文電腦科學學習筆記。用清楚的概念、C 程式範例與常見錯誤，掌握 UNIX 系統程式設計。">
+  <title>CS Pocket Notes — 把觀念，放進口袋。</title>
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">跳至主要內容</a>
+  <header class="site-header">
+    <div class="container header-inner">
+      <a class="brand" href="index.html" aria-label="CS Pocket Notes 首頁"><span class="brand-mark" aria-hidden="true">&lt;/&gt;</span>CS Pocket Notes</a>
+      <nav class="site-nav" aria-label="主要導覽"><a href="#notes">所有筆記</a><a href="#about">關於本站</a></nav>
+    </div>
+  </header>
+  <main id="main" class="container">
+    <section class="hero" aria-labelledby="hero-title">
+      <div>
+        <p class="eyebrow">A little clarity, one concept at a time.</p>
+        <h1 id="hero-title">把觀念，<br><span>放進口袋。</span></h1>
+        <p class="hero-description">給正在學習電腦科學的你。把複雜的系統觀念，整理成讀得懂、記得住的繁體中文筆記，從一個小範例開始理解。</p>
+        <div class="hero-actions"><a class="button" href="#notes">開始閱讀 <span aria-hidden="true">↗</span></a><span class="small-note">UNIX / C · 概念 × 範例 × 複習</span></div>
+      </div>
+      <aside class="concept-preview" aria-label="觀念預覽：共享檔案位移">
+        <div class="preview-label"><span>POCKET CONCEPT / 01</span><span aria-hidden="true">C</span></div>
+        <div class="preview-body">
+          <p class="eyebrow">先懂觀念，再記語法</p>
+          <h2>兩個 fd，也能共用一個位置。</h2>
+          <pre><code>int copy = dup(fd);
+read(fd, &amp;ch, 1);
+// copy 的下一次讀取也會往前一格</code></pre>
+          <p>關鍵不是描述符的數字，而是它們指向的 open file description。</p>
+        </div>
+      </aside>
+    </section>
+    <section id="notes" class="notes-section" aria-labelledby="notes-title">
+      <div class="section-heading"><div><p class="eyebrow">The notebook</p><h2 id="notes-title">從這裡，理清系統觀念</h2></div><p>04 篇筆記 · UNIX 系統程式設計</p></div>
+      <div class="notes-grid">
+        <article class="note-card">
+          <div class="card-topline"><span class="card-number">01 / FILE I/O</span><span class="tag">檔案操作</span></div>
+          <h3>檔案位移</h3><p class="card-subtitle">File offset &amp; shared state</p>
+          <p class="card-description">讀完資料後，下一次從哪裡開始？用 open、dup 與 lseek，理解檔案位置如何移動與共享。</p>
+          <a class="card-link" href="notes/file-offset.html">閱讀檔案位移筆記 <span aria-hidden="true">↗</span></a>
+        </article>
+        <article class="note-card">
+          <div class="card-topline"><span class="card-number">02 / PROCESS</span><span class="tag">行程控制</span></div>
+          <h3>建立與結束行程</h3><p class="card-subtitle">fork, exit &amp; waitpid</p>
+          <p class="card-description">一次呼叫，兩條執行路徑。看懂 fork 的回傳值、stdio 緩衝，以及父行程如何回收子行程。</p>
+          <a class="card-link" href="notes/fork-and-exit.html">閱讀行程控制筆記 <span aria-hidden="true">↗</span></a>
+        </article>
+        <article class="note-card">
+          <div class="card-topline"><span class="card-number">03 / MULTIPLEXING</span><span class="tag">I/O 多工</span></div>
+          <h3>select 與 poll</h3><p class="card-subtitle">Wait for I/O readiness</p>
+          <p class="card-description">同時等待多個 I/O，不必逐一阻塞。比較集合與陣列介面、逾時設定，以及就緒事件的正確處理。</p>
+          <a class="card-link" href="notes/select-vs-poll.html">閱讀 I/O 多工筆記 <span aria-hidden="true">↗</span></a>
+        </article>
+        <article class="note-card">
+          <div class="card-topline"><span class="card-number">04 / LOCKING</span><span class="tag">檔案鎖定</span></div>
+          <h3>fcntl() Record Locking</h3><p class="card-subtitle">Advisory byte-range locks</p>
+          <p class="card-description">多個行程如何協調同一段檔案的存取？理解讀寫鎖、鎖定範圍，以及等待、查詢與解鎖的差異。</p>
+          <a class="card-link" href="notes/fcntl-record-locking.html">閱讀 Record Locking 筆記 <span aria-hidden="true">↗</span></a>
+        </article>
+      </div>
+    </section>
+    <section id="about" class="about" aria-labelledby="about-title">
+      <div><p class="eyebrow">Made for understanding</p><h2 id="about-title">一篇筆記，一個清楚的觀念。</h2></div>
+      <p>CS Pocket Notes 是持續累積的電腦科學學習筆記。每篇都從快速摘要出發，接著拆解核心觀念、走讀程式範例，再用常見錯誤與重點整理收尾。適合初次學習，也適合考試前回來翻一翻。</p>
+    </section>
+  </main>
+  <footer class="site-footer"><div class="container footer-inner"><p><strong>CS Pocket Notes</strong> · 電腦科學口袋筆記</p><p>用小篇幅，累積扎實的理解。</p></div></footer>
+</body>
+</html>

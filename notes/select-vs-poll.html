@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="用一個等待點監看多個 fd，分清 select 的集合與 poll 的事件陣列，避免把就緒誤認為傳輸完成。">
+  <title>select 與 poll：等待 I/O 就緒 — CS Pocket Notes</title>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">跳至主要內容</a>
+  <header class="site-header"><div class="container header-inner">
+    <a class="brand" href="../index.html" aria-label="CS Pocket Notes 首頁"><span class="brand-mark" aria-hidden="true">&lt;/&gt;</span>CS Pocket Notes</a>
+    <nav class="site-nav" aria-label="主要導覽"><a href="../index.html#notes">所有筆記</a><a href="../index.html#about">關於本站</a></nav>
+  </div></header>
+  <main id="main" class="container">
+    <nav class="breadcrumb" aria-label="麵包屑導覽"><a href="../index.html">首頁</a><span aria-hidden="true">/</span><span>select 與 poll：等待 I/O 就緒</span></nav>
+    <header class="note-heading"><p class="eyebrow">UNIX / C · I/O 多工 / MULTIPLEXING</p><h1>select 與 poll：等待 I/O 就緒</h1><p class="note-deck">用一個等待點監看多個 fd，分清 select 的集合與 poll 的事件陣列，避免把就緒誤認為傳輸完成。</p></header>
+    <div class="note-layout">
+      <nav class="toc" aria-label="本篇目錄"><h2>本篇目錄</h2><ol>
+        <li><a href="#quick-summary">01 快速摘要</a></li>
+        <li><a href="#core-concepts">02 核心觀念</a></li>
+        <li><a href="#code-example">03 程式範例</a></li>
+        <li><a href="#common-mistakes">04 常見錯誤</a></li>
+        <li><a href="#key-takeaways">05 重點整理</a></li>
+      </ol></nav>
+      <article class="note-content" aria-label="筆記內容">
+        <section id="quick-summary" class="note-section summary">
+          <h2><span class="section-number">01</span>快速摘要 <span lang="en">Quick Summary</span></h2>
+          <p><code>select()</code> 與 <code>poll()</code> 都是 <strong>I/O multiplexing（I/O 多工）</strong>介面：同時等待多個 fd，並回報哪些可以進行 I/O。它們不會替你讀寫資料；<code>select()</code> 使用 fd 集合，<code>poll()</code> 使用事件陣列。</p>
+        </section>
+        <section id="core-concepts" class="note-section">
+          <h2><span class="section-number">02</span>核心觀念 <span lang="en">Core Concepts</span></h2>
+          <h3>01 / 就緒，表示現在可以嘗試 I/O</h3>
+          <p>直接對沒有資料的阻塞式 fd 呼叫 read，可能一直等待。I/O 多工先等待一組 fd 的狀態，讓單一行程能處理多個來源，不必卡在其中一個。</p>
+          <p><strong>可讀不一定代表有資料：</strong>EOF 也可能被回報為可讀，這時 read 會回傳 0。就緒不保證讀滿你要求的長度，也不保證一次 write 能寫完任意大小的資料；正式事件迴圈通常搭配 nonblocking I/O，處理 <code>EAGAIN</code>、短讀與短寫。</p>
+          <h3>02 / 介面的差異</h3>
+          <div class="table-wrap"><table><caption>select 與 poll 的重點比較</caption><thead><tr><th scope="col">比較項目</th><th scope="col">select</th><th scope="col">poll</th></tr></thead><tbody>
+          <tr><th scope="row">監看資料結構</th><td>讀、寫、例外三組 fd_set</td><td>struct pollfd 陣列</td></tr>
+          <tr><th scope="row">數量參數</th><td>nfds = 最大 fd + 1</td><td>nfds = 陣列元素個數</td></tr>
+          <tr><th scope="row">結果放哪裡</th><td>原集合被改成就緒子集合</td><td>每個元素的 revents</td></tr>
+          <tr><th scope="row">逾時</th><td>timeval，秒 + 微秒；NULL 表示無限等待</td><td>整數毫秒；負數表示無限等待</td></tr>
+          <tr><th scope="row">不等待</th><td>timeval 兩欄都為 0</td><td>timeout = 0</td></tr>
+          <tr><th scope="row">fd 限制</th><td>fd 必須小於 FD_SETSIZE；Linux/glibc 通常為 1024</td><td>無 fd_set 的固定編號限制，仍受系統資源限制</td></tr>
+          </tbody></table></div>
+          <p>select 每次呼叫前要重建集合與 timeout：集合會被修改，timeout 在不同平台的處理也有差異。poll 的 <code>events</code> 是要求監看的事件，<code>revents</code> 是本次回報的結果；同時有多個事件時，要用位元運算 <code>&amp;</code> 檢查。</p>
+          <p>兩者回傳 <code>-1</code> 表示錯誤，<code>0</code> 表示逾時，正數表示有就緒結果。select 的正數是三個結果集合內設定位元的總數，同一個 fd 在不同集合可能重複計入；poll 則計算 revents 非零的陣列元素數。</p>
+          <h3>03 / 就緒以後仍要處理邊界情況</h3>
+          <ul><li><strong>EINTR：</strong>等待可能被訊號打斷。若要重試，需重建輸入資料；若有總時間限制，還要依剩餘時間計算逾時。</li><li><strong>POLLHUP：</strong>對方已掛斷，但可能還有尚未讀出的資料，常與 POLLIN 同時出現。</li><li><strong>POLLERR / POLLNVAL：</strong>分別表示錯誤狀態或無效 fd；即使沒有放入 events，也可能出現在 revents。</li><li><strong>規模：</strong>poll 不代表任何情況都比較快。兩者通常都需要隨監看範圍或陣列長度掃描；大量連線可再研究 Linux 的 epoll 或 BSD/macOS 的 kqueue。</li></ul>
+        </section>
+        <section id="code-example" class="note-section">
+          <h2><span class="section-number">03</span>程式範例 <span lang="en">Code Example</span></h2>
+          <p>下面是兩支可各自編譯的 POSIX 程式，都等待標準輸入最多約 5 秒，<strong>只回報狀態，不讀取內容</strong>，讓介面差異更清楚。一般終端機採 canonical mode，請輸入文字後按 Enter。</p>
+          <p class="code-label">C / wait-select.c</p><pre><code class="language-c">#define _POSIX_C_SOURCE 200809L
+#include &lt;stdio.h&gt;
+#include &lt;sys/select.h&gt;
+#include &lt;unistd.h&gt;
+
+int main(void)
+{
+    int fd = STDIN_FILENO;
+    if (fd &gt;= FD_SETSIZE) {
+        fputs(&quot;fd exceeds fd_set capacity\n&quot;, stderr);
+        return 1;
+    }
+    fd_set reads;
+    FD_ZERO(&amp;reads);
+    FD_SET(fd, &amp;reads);
+    struct timeval timeout = { .tv_sec = 5, .tv_usec = 0 };
+
+    int n = select(fd + 1, &amp;reads, NULL, NULL, &amp;timeout);
+    if (n == -1) { perror(&quot;select&quot;); return 1; }
+    if (n == 0) { puts(&quot;timeout&quot;); return 0; }
+    if (FD_ISSET(fd, &amp;reads))
+        puts(&quot;stdin readable: data or EOF (use read to check)&quot;);
+    return 0;
+}</code></pre>
+          <p class="code-label">C / wait-poll.c</p><pre><code class="language-c">#define _POSIX_C_SOURCE 200809L
+#include &lt;poll.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;unistd.h&gt;
+
+int main(void)
+{
+    struct pollfd item = {
+        .fd = STDIN_FILENO, .events = POLLIN, .revents = 0
+    };
+    int n = poll(&amp;item, 1, 5000);
+    if (n == -1) { perror(&quot;poll&quot;); return 1; }
+    if (n == 0) { puts(&quot;timeout&quot;); return 0; }
+
+    if (item.revents &amp; POLLNVAL) {
+        fputs(&quot;invalid fd\n&quot;, stderr);
+        return 1;
+    }
+    if (item.revents &amp; POLLERR) {
+        fputs(&quot;I/O error event\n&quot;, stderr);
+        return 1;
+    }
+    if (item.revents &amp; POLLIN)
+        puts(&quot;stdin readable: use read to inspect data or EOF&quot;);
+    if (item.revents &amp; POLLHUP)
+        puts(&quot;hangup: drain remaining data before closing&quot;);
+    return 0;
+}</code></pre>
+          <p class="code-label">SHELL / 編譯與操作</p><pre><code>cc -std=c11 -Wall -Wextra -Wpedantic wait-select.c -o wait-select
+cc -std=c11 -Wall -Wextra -Wpedantic wait-poll.c -o wait-poll
+./wait-select
+./wait-poll</code></pre>
+          <p>每次啟動後，在 5 秒內輸入文字並按 Enter，會看到 <code>stdin readable: ...</code>；若沒有輸入、EOF 或其他事件，會印出 <code>timeout</code>。排程可能讓實際等待略超過指定時間。</p>
+          <p>也可執行 <code>printf 'hello\n' | ./wait-select</code> 或 <code>printf 'hello\n' | ./wait-poll</code>。poll 可能同時回報 readable 與 hangup，取決於寫端是否已關閉；事件組合不應被假設固定。</p>
+          <p>為保持範例聚焦，遇到包含 EINTR 在內的等待錯誤會印出訊息並結束。實際事件迴圈需重試、移除失效 fd，並呼叫 read／write 處理資料；poll 範例的錯誤分支採取直接結束的策略。</p>
+        </section>
+        <section id="common-mistakes" class="note-section">
+          <h2><span class="section-number">04</span>常見錯誤 <span lang="en">Common Mistakes</span></h2>
+          <ul><li><strong>「select 的 nfds 是監看數量」：</strong>它是最大 fd 加一；poll 才傳入陣列元素數。</li><li><strong>「select 的集合能直接重用」：</strong>回傳後只剩就緒項目，下一輪必須重建。</li><li><strong>「poll 的 timeout 單位是秒」：</strong>單位是毫秒，5000 才是 5 秒。</li><li><strong>「revents == POLLIN 就夠了」：</strong>事件是 bitmask，應用 <code>revents &amp; POLLIN</code>，並另外檢查掛斷與錯誤。</li><li><strong>「就緒就代表資料已讀完」：</strong>它只回報狀態，仍需執行 I/O，判斷 EOF 與錯誤。</li></ul>
+        </section>
+        <section id="key-takeaways" class="note-section takeaways">
+          <h2><span class="section-number">05</span>重點整理 <span lang="en">Key Takeaways</span></h2>
+          <ol><li>兩者都是等待就緒的工具，不負責實際資料傳輸。</li><li>select 用集合與最大 fd + 1；poll 用陣列與元素數。</li><li>select 的集合與逾時要重建，poll 要檢查 revents 位元。</li><li>就緒仍可能遇到 EOF、短讀、短寫或狀態變化。</li><li>處理 EINTR、掛斷與錯誤，才能建立可靠的事件迴圈。</li></ol>
+        </section>
+        <details class="references"><summary>參考文件與延伸閱讀</summary><p>以下為 Linux man-pages 專案文件；本文以 POSIX 共通觀念為主，平台差異另行註明。</p><ul><li><a href="https://man7.org/linux/man-pages/man2/select.2.html">select(2)：集合、逾時與就緒語意</a></li><li><a href="https://man7.org/linux/man-pages/man2/poll.2.html">poll(2)：事件、回傳值與掛斷</a></li><li><a href="https://man7.org/linux/man-pages/man2/read.2.html">read(2)：短讀與 EOF</a></li></ul></details>
+        <div class="note-bottom"><a href="../index.html">← 返回首頁</a><a href="#main">回到頂端 ↑</a></div>
+      </article>
+    </div>
+  </main>
+  <footer class="site-footer"><div class="container footer-inner"><p><strong>CS Pocket Notes</strong> · 電腦科學口袋筆記</p><p>用小篇幅，累積扎實的理解。</p></div></footer>
+</body>
+</html>
