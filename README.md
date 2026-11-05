@@ -2,7 +2,7 @@
 
 以繁體中文整理電腦科學觀念的靜態學習筆記網站。每篇包含快速摘要、核心觀念、程式範例、常見錯誤與重點整理，適合學習與考前複習。
 
-目前收錄 UNIX/C 系統程式設計的三個主題：檔案位移、行程建立與結束、select 與 poll。
+目前收錄 UNIX/C 系統程式設計的四個主題：檔案位移、行程建立與結束、select 與 poll、fcntl() Record Locking。
 
 ## 檔案結構
 
@@ -16,7 +16,8 @@ cs-pocket-notes/
 ├── notes/
 │   ├── file-offset.html
 │   ├── fork-and-exit.html
-│   └── select-vs-poll.html
+│   ├── select-vs-poll.html
+│   └── fcntl-record-locking.html
 └── templates/
     └── note-template.html
 ```

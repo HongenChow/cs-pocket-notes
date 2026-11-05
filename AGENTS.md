@@ -43,6 +43,7 @@ cs-pocket-notes/
   - file-offset.html
   - fork-and-exit.html
   - select-vs-poll.html
+  - fcntl-record-locking.html
 - templates/
   - note-template.html：新增筆記的標準模板
 
